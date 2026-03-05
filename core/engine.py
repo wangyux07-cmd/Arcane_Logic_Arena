@@ -141,6 +141,7 @@ class MagicArena:
 
     def _process_action(self, mage, action):
         if not action:
+            self.mage_states[mage.name]['state'] = 'Idle'
             return
 
         mage.is_meditating = False
@@ -152,20 +153,20 @@ class MagicArena:
         if command == 'FIREBALL':
             if mage.mp >= 20:
                 self.cast_fireball(mage, params[0], params[1])
-                self.mage_states[mage.name]['is_casting'] = True
-                self.mage_states[mage.name]['target'] = params
+                self.mage_states[mage.name].update({'is_casting': True, 'target': params, 'state': 'Attack'})
                 logger.log(f"{mage.name} casts Fireball!", log_type='attack')
         elif command == 'BLINK':
             if mage.mp >= 15:
                 if not self.headless:
                     self.renderer.add_blink_effect(mage.name, (mage.x, mage.y))
                 self.cast_blink(mage, params[0], params[1])
+                self.mage_states[mage.name]['state'] = 'Evade'
                 logger.log(f"{mage.name} blinks.", log_type='system')
         elif command == 'MEDITATE':
             self.start_meditation(mage)
-            # Logging is now handled in get_game_state to avoid duplicates
+            self.mage_states[mage.name]['state'] = 'Meditating'
         elif command == 'WAIT':
-            pass # Also handled in get_game_state
+            self.mage_states[mage.name]['state'] = 'Idle'
 
     def step(self, actions: dict, wizards: dict):
         self.events.clear() # Clear events at the start of the tick

@@ -68,6 +68,12 @@ class HeuristicWizard(BaseWizard):
         dist_to_enemy = self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y'])
         IDEAL_DISTANCE = 350.0
 
+        # --- Threat Assessment ---
+        incoming_projectiles = [p for p in observation.get('projectiles', []) if p.get('owner') != self.name]
+        nearest_threat_dist = float('inf')
+        if incoming_projectiles:
+            nearest_threat_dist = min(self._distance(my_mage['x'], my_mage['y'], p['x'], p['y']) for p in incoming_projectiles)
+
         # Baseline scores for actions
         if command == 'FIREBALL':
             # Reward attacking, but penalize if too close or too far
@@ -78,28 +84,42 @@ class HeuristicWizard(BaseWizard):
         
         elif command == 'BLINK':
             new_x, new_y = action.params
-            new_dist_to_enemy = self._distance(new_x, new_y, enemy_mage['x'], enemy_mage['y'])
             
-            # High reward for blinking to ideal distance, especially if low on health
+            # --- Scoring for Evasion ---
+            evasion_bonus = 0
+            if nearest_threat_dist < 150: # Only consider evading if a threat is close
+                new_threat_dist = float('inf')
+                if incoming_projectiles:
+                    new_threat_dist = min(self._distance(new_x, new_y, p['x'], p['y']) for p in incoming_projectiles)
+                
+                # If the new position is safer, grant a large bonus
+                if new_threat_dist > nearest_threat_dist:
+                    evasion_bonus = 200 # High base reward for successful dodge
+                    # Bonus is higher if health is low
+                    evasion_bonus += (100 - my_mage['hp']) * 2
+            score += evasion_bonus
+
+            # --- Scoring for Positioning ---
+            new_dist_to_enemy = self._distance(new_x, new_y, enemy_mage['x'], enemy_mage['y'])
             current_dist_error = abs(dist_to_enemy - IDEAL_DISTANCE)
             new_dist_error = abs(new_dist_to_enemy - IDEAL_DISTANCE)
             
             # Reward for improving our position (getting closer to ideal distance)
             score += (current_dist_error - new_dist_error) * 0.5
-            
-            # Bonus for evading when health is low
-            if my_mage['hp'] < 50:
-                score += (100 - my_mage['hp']) * 0.5
         
         elif command == 'MEDITATE':
             # Reward based on missing MP
             score += (50 - my_mage['mp']) * 1.5
-            # Penalize heavily if not at a safe distance
-            if dist_to_enemy < IDEAL_DISTANCE - 50:
+            # Penalize heavily if not at a safe distance or if under threat
+            if dist_to_enemy < IDEAL_DISTANCE - 50 or nearest_threat_dist < 200:
                 score -= 150
         
         elif command == 'WAIT':
-            score += 1
+            # Penalize waiting if under immediate threat
+            if nearest_threat_dist < 150:
+                score -= 300
+            else:
+                score += 1
 
         return score
 
