@@ -118,7 +118,10 @@ class MagicArena:
                     # De-duplicated logging: Log FSM state changes
                     last_state = self.last_logged_states.get(m.name)
                     if last_state != current_fsm_state:
-                        logger.log(f"{m.name} is now {current_fsm_state.lower()}.", log_type='system')
+                        if "Evade" in current_fsm_state:
+                            logger.log(f"[DEBUG] {m.name} detected threat, switching to EVADE!", log_type='system')
+                        else:
+                            logger.log(f"{m.name} is now {current_fsm_state.lower()}.", log_type='system')
                         self.last_logged_states[m.name] = current_fsm_state
 
                 # Get debug info for rendering
@@ -223,6 +226,10 @@ class MagicArena:
                 current_state = self.step(actions, wizards)
             else:
                 current_state = self.get_game_state(wizards)
+                # Clear projectiles from the screen once the game is over
+                if current_state['projectiles']:
+                    current_state['projectiles'].clear()
+                    self.projectiles.clear() # Also clear the engine's list
 
             self.renderer.render(current_state, logger.get_messages())
             clock.tick(60)

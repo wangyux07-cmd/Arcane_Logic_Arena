@@ -37,15 +37,23 @@ class Renderer:
         try:
             self.font_ui = pygame.font.SysFont("Georgia", 16, bold=True)
             self.font_log = pygame.font.SysFont("Consolas", 15)
-            self.font_state = pygame.font.SysFont("Georgia", 12, italic=True)
+            self.font_state = pygame.font.SysFont("Georgia", 10, italic=True)
             self.font_damage = pygame.font.SysFont("Arial", 20, bold=True)
         except pygame.error:
             self.font_ui = pygame.font.Font(None, 22)
             self.font_log = pygame.font.Font(None, 21)
-            self.font_state = pygame.font.Font(None, 18)
+            self.font_state = pygame.font.Font(None, 16)
             self.font_damage = pygame.font.Font(None, 26)
 
         self.arcane_particles = self._create_particles(200)
+        
+        # Pre-render the magic circle layers for performance
+        self.magic_circle_radius = int(self.playable_height * 0.45)
+        self.magic_circle_surf_1 = pygame.Surface((self.magic_circle_radius * 2, self.magic_circle_radius * 2), pygame.SRCALPHA)
+        self._draw_magic_circle_layer_1(self.magic_circle_surf_1, self.magic_circle_radius)
+        self.magic_circle_surf_2 = pygame.Surface((self.magic_circle_radius * 2, self.magic_circle_radius * 2), pygame.SRCALPHA)
+        self._draw_magic_circle_layer_2(self.magic_circle_surf_2, self.magic_circle_radius)
+
         self.background_surface = self._create_background_surface()
         self.displayed_stats = {}
         self.vfx = {
@@ -65,45 +73,12 @@ class Renderer:
             color = COLOR_BACKGROUND_EDGE.lerp(COLOR_BACKGROUND_CENTER, ratio)
             pygame.draw.circle(surface, color, center, r)
 
-        # Draw the magic circle, scaled to the playable area
-        self._draw_magic_circle(surface, center, int(self.playable_height * 0.45), (255, 255, 255), 30)
-        
         # Create a final surface of the full screen size to blit onto
         full_surface = pygame.Surface((self.width, self.height))
         full_surface.fill(COLOR_BACKGROUND_EDGE) # Fill the log area with the darkest color
         full_surface.blit(surface, (0, 0))
 
         return full_surface
-
-    def _draw_magic_circle(self, surface, center, radius, color, alpha):
-        circle_surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
-        
-        # Base circles
-        pygame.draw.circle(circle_surf, (color[0], color[1], color[2], alpha), (radius, radius), radius, 2)
-        pygame.draw.circle(circle_surf, (color[0], color[1], color[2], alpha // 2), (radius, radius), int(radius * 0.9), 1)
-        pygame.draw.circle(circle_surf, (color[0], color[1], color[2], alpha // 2), (radius, radius), int(radius * 0.5), 3)
-        pygame.draw.circle(circle_surf, (color[0], color[1], color[2], alpha), (radius, radius), int(radius * 0.45), 1)
-
-        # Triangle
-        num_points = 3
-        points = []
-        for i in range(num_points):
-            angle = math.radians(i * (360 / num_points) + 90)
-            x = radius + int(radius * 0.9 * math.cos(angle))
-            y = radius + int(radius * 0.9 * math.sin(angle))
-            points.append((x, y))
-        pygame.draw.polygon(circle_surf, (color[0], color[1], color[2], alpha), points, 2)
-
-        # Runes (simplified as arcs)
-        for i in range(6):
-            angle = math.radians(i * 60)
-            start_angle = angle - math.radians(15)
-            end_angle = angle + math.radians(15)
-            rect = (radius - radius * 0.7, radius - radius * 0.7, radius * 1.4, radius * 1.4)
-            pygame.draw.arc(circle_surf, (color[0], color[1], color[2], alpha), rect, start_angle, end_angle, 2)
-            
-        surface.blit(circle_surf, (center[0] - radius, center[1] - radius))
-
 
     def _create_particles(self, count):
         return [{
@@ -118,7 +93,7 @@ class Renderer:
             name = mage['name']
             if name not in self.displayed_stats:
                 self.displayed_stats[name] = {'x': mage['x'], 'y': mage['y'], 'hp': mage['hp'], 'mp': mage['mp'], 'state': mage.get('state')}
-                self.vfx["mage_effects"][name] = {'last_state': mage.get('state'), 'state_change_time': 0}
+                self.vfx["mage_effects"][name] = {'last_state': mage.get('state'), 'state_change_time': 0, 'damage_flash_timer': 0}
             
             stats = self.displayed_stats[name]
             stats['x'] += (mage['x'] - stats['x']) * SMOOTHING_FACTOR
@@ -133,6 +108,15 @@ class Renderer:
         for event in game_state.get("events", []):
             if event['type'] == 'damage':
                 self.add_floating_number(f"-{event['amount']}", event['pos'])
+                
+                # Find the closest mage and trigger damage VFX
+                closest_mage = min(
+                    game_state.get("mages", []),
+                    key=lambda m: math.hypot(m['x'] - event['pos'][0], m['y'] - event['pos'][1])
+                )
+                if closest_mage and math.hypot(closest_mage['x'] - event['pos'][0], closest_mage['y'] - event['pos'][1]) < 50:
+                    self.vfx["mage_effects"][closest_mage['name']]['damage_flash_timer'] = 0.1
+                
                 self.vfx["screen_shake_timer"] = SHAKE_DURATION
         
         active_proj_ids = {p.get('id') for p in game_state.get("projectiles", [])}
@@ -163,7 +147,6 @@ class Renderer:
             render_offset = (random.randint(-SHAKE_INTENSITY, SHAKE_INTENSITY), random.randint(-SHAKE_INTENSITY, SHAKE_INTENSITY))
 
         self._draw_background_and_particles(render_offset)
-        self._draw_gothic_border(render_offset)
         self._draw_projectiles_and_trails(game_state, render_offset)
         self._draw_vfx_effects(game_state, render_offset)
         self._draw_mages(game_state, render_offset)
@@ -177,8 +160,21 @@ class Renderer:
     def _draw_background_and_particles(self, offset):
         self.screen.blit(self.background_surface, (0, 0))
         
+        # --- Animated Magic Circle ---
         center_x, center_y = self.width // 2, self.playable_height // 2
         
+        # Breathing effect for the circle's alpha
+        breath_alpha = (math.sin(time.time() * (2 * math.pi / 3)) + 1) / 2 # 3-second cycle
+        alpha = int(30 + breath_alpha * 40) # Fluctuates between 30 and 70
+        
+        # Rotate and draw the two layers
+        angle1 = time.time() * 10 # Slow clockwise rotation
+        angle2 = -time.time() * 15 # Slow counter-clockwise rotation
+
+        self._blit_rotated_surface(self.screen, self.magic_circle_surf_1, (center_x, center_y), angle1, alpha)
+        self._blit_rotated_surface(self.screen, self.magic_circle_surf_2, (center_x, center_y), angle2, alpha)
+
+        # --- Arcane Particles ---
         for p in self.arcane_particles:
             # Keep particles within the playable area
             if not (0 < p['pos'][0] < self.width and 0 < p['pos'][1] < self.playable_height):
@@ -213,13 +209,6 @@ class Renderer:
             pygame.draw.circle(temp_surf, color, (p['radius'], p['radius']), p['radius'])
             self.screen.blit(temp_surf, (p['pos'][0] - p['radius'] + offset[0], p['pos'][1] - p['radius'] + offset[1]))
 
-    def _draw_gothic_border(self, offset):
-        border_surf = pygame.Surface((self.width, self.playable_height), pygame.SRCALPHA)
-        for i in range(10):
-            alpha = (10 - i) * 8
-            pygame.draw.rect(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, alpha), (i*2, i*2, self.width-i*4, self.playable_height-i*4), 2, border_radius=5)
-        self.screen.blit(border_surf, offset)
-
     def _draw_mages(self, game_state, offset):
         for mage_data in game_state.get("mages", []):
             name = mage_data['name']
@@ -228,22 +217,23 @@ class Renderer:
             color = COLOR_MAGE_A if "FSM" in name else COLOR_MAGE_B
             vfx_info = self.vfx["mage_effects"][name]
 
+            mage_pos_eff = list(pos)
+            if vfx_info.get('damage_flash_timer', 0) > 0:
+                vfx_info['damage_flash_timer'] -= 1/60.0
+                mage_pos_eff[0] += random.randint(-2, 2)
+                mage_pos_eff[1] += random.randint(-2, 2)
+
             # --- Name & Health/Mana Arcs ---
             name_parts = mage_data['name'].split('_')
             formatted_name = f"{name_parts[1]} ({name_parts[0]})"
             name_label = self.font_ui.render(formatted_name, True, COLOR_TEXT_GREY)
-            name_pos = (pos[0] - name_label.get_width() // 2, pos[1] - 45) # Y-pos adjusted
+            name_pos = (pos[0] - name_label.get_width() // 2, pos[1] - 65)
             self.screen.blit(name_label, name_pos)
             
-            arc_radius = 30 # Increased radius
-            # HP Bar (Top)
+            # --- Circular HP Bar at feet ---
             hp_percent = stats['hp'] / 100.0
             hp_color = COLOR_HP_LOW.lerp(COLOR_HP_HIGH, hp_percent)
-            self._draw_arc_bar(self.screen, pos, arc_radius, 4, hp_percent, hp_color, math.pi * 1.2, math.pi * 1.8)
-            
-            # MP Bar (Bottom)
-            mp_percent = stats['mp'] / 50.0
-            self._draw_arc_bar(self.screen, pos, arc_radius, 4, mp_percent, COLOR_MP, math.pi * 0.2, math.pi * 0.8)
+            self._draw_arc_bar(self.screen, (pos[0], pos[1] + 10), 28, 4, hp_percent, hp_color, 0, math.pi * 2)
 
             # --- Target Indicator ---
             debug_info = mage_data.get('debug', {})
@@ -251,7 +241,7 @@ class Renderer:
                 target_pos = debug_info['plan']['target']
                 self._draw_target_indicator(self.screen, pos, (target_pos[0] + offset[0], target_pos[1] + offset[1]))
 
-            # --- Rune Circle Logic ---
+            # --- Rune Circle & Attack Wind-up Logic ---
             state = mage_data.get('state', 'IDLE')
             state_change_delta = time.time() - vfx_info['state_change_time']
             
@@ -262,20 +252,23 @@ class Renderer:
             if state == 'Attack':
                 rune_color = pygame.Color("#FF4500")
                 rotation_speed = 300
+                # Attack Wind-up visual
+                if state_change_delta < 0.2:
+                    charge_ratio = state_change_delta / 0.2
+                    rune_color = rune_color.lerp(pygame.Color("white"), 0.5 + charge_ratio * 0.5)
+                    self._draw_converging_particles(mage_pos_eff, rune_radius, charge_ratio)
+
             elif state == 'Evade':
                 rune_color = pygame.Color("#00FFFF")
-                # Flash effect for 0.4 seconds after state change
-                if state_change_delta < 0.4:
-                    if int(state_change_delta * 20) % 2 == 0: # Flash on/off rapidly
-                        rune_color.a = 0
+                if state_change_delta < 0.4 and int(state_change_delta * 20) % 2 == 0:
+                    rune_color.a = 0
                 
-            # Default pulsing alpha
-            pulse = (math.sin(time.time() * 3) + 1) / 2 # Oscillates between 0 and 1
+            pulse = (math.sin(time.time() * 3) + 1) / 2
             base_alpha = 100 if state != 'Attack' else 255
             rune_color.a = int(base_alpha * pulse) if rune_color.a != 0 else 0
 
             rotation_angle = (time.time() * rotation_speed) % 360
-            self._draw_rune_circle(self.screen, pos, rune_color, rune_radius, rotation_angle)
+            self._draw_rune_circle(self.screen, (pos[0], pos[1]), rune_color, rune_radius, rotation_angle)
             # --- End Rune Circle ---
 
             for proj in game_state.get("projectiles", []):
@@ -290,11 +283,15 @@ class Renderer:
             else:
                 self._draw_rotating_ring(pos, color, 12, 2, (time.time()*60)%360, 70)
 
-            self._draw_gothic_mage(self.screen, pos, color)
+            # Apply white flash if being damaged
+            if vfx_info.get('damage_flash_timer', 0) > 0:
+                self._draw_gothic_mage(self.screen, mage_pos_eff, pygame.Color("white"))
+            else:
+                self._draw_gothic_mage(self.screen, mage_pos_eff, color)
             
             state_text = mage_data.get('state', 'IDLE').upper()
             label = self.font_state.render(f"{state_text}...", True, COLOR_TEXT_GREY)
-            self.screen.blit(label, (pos[0] - label.get_width() // 2, pos[1] - 60)) # Y-pos adjusted
+            self.screen.blit(label, (pos[0] - label.get_width() // 2, pos[1] - 40))
 
     def _draw_gothic_mage(self, surface, pos, color):
         body_width = 8
@@ -461,10 +458,7 @@ class Renderer:
 
         self.screen.blit(log_surface, (offset[0], self.playable_height + offset[1]))
         
-        # Draw decorative separator line
-        line_y = self.playable_height + offset[1]
-        pygame.draw.line(self.screen, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 100), (offset[0], line_y), (offset[0] + self.width, line_y), 2)
-        pygame.draw.line(self.screen, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 50), (offset[0], line_y + 2), (offset[0] + self.width, line_y + 2), 1)
+        self._draw_decorative_border(offset)
 
     def _draw_vfx_effects(self, game_state, offset):
         for fn in self.vfx["floating_numbers"][:]:
@@ -569,3 +563,116 @@ class Renderer:
         
     def add_blink_effect(self, name, pos):
         self.vfx["blinks"].append({'name': name, 'pos': pos, 'alpha': 255})
+        
+    def _blit_rotated_surface(self, surface, surf, pos, angle, alpha):
+        # Create a new surface with the same color but different alpha
+        temp_surf = surf.copy()
+        temp_surf.fill((255, 255, 255, alpha), special_flags=pygame.BLEND_RGBA_MULT)
+        
+        rotated_surf = pygame.transform.rotate(temp_surf, angle)
+        new_rect = rotated_surf.get_rect(center=pos)
+        surface.blit(rotated_surf, new_rect)
+
+    def _draw_magic_circle_layer_1(self, surface, radius):
+        # Outer, more complex patterns - Pentagram and detailed ring
+        color = (255, 255, 255, 200) 
+        center = (radius, radius)
+        
+        # Outer rings
+        pygame.draw.circle(surface, color, center, radius, 1)
+        pygame.draw.circle(surface, color, center, int(radius * 0.96), 2)
+
+        # Draw the main pentagram
+        points = []
+        for i in range(5):
+            angle = math.radians(i * 72 - 90) # 360/5 = 72 degrees per point
+            x = center[0] + int(radius * 0.96 * math.cos(angle))
+            y = center[1] + int(radius * 0.96 * math.sin(angle))
+            points.append((x, y))
+        pygame.draw.lines(surface, color, True, points, 2)
+        
+        # Draw lines connecting the vertices of the pentagram
+        pygame.draw.line(surface, color, points[0], points[2], 2)
+        pygame.draw.line(surface, color, points[0], points[3], 2)
+        pygame.draw.line(surface, color, points[1], points[3], 2)
+        pygame.draw.line(surface, color, points[1], points[4], 2)
+        pygame.draw.line(surface, color, points[2], points[4], 2)
+
+
+    def _draw_magic_circle_layer_2(self, surface, radius):
+        # Inner, faster rotating symbols - Rose Window
+        color = (255, 255, 255, 200)
+        center = (radius, radius)
+        
+        # Inner circle
+        pygame.draw.circle(surface, color, center, int(radius * 0.6), 2)
+
+        # "Rose window" petals using arcs
+        num_petals = 6
+        for i in range(num_petals):
+            angle = math.radians(i * (360 / num_petals))
+            
+            # Petal shape using two arcs
+            petal_radius = radius * 0.3
+            petal_center_r = radius * 0.3
+            
+            p_center_x = center[0] + petal_center_r * math.cos(angle)
+            p_center_y = center[1] + petal_center_r * math.sin(angle)
+            
+            rect = (p_center_x - petal_radius, p_center_y - petal_radius, petal_radius * 2, petal_radius * 2)
+            
+            # The angles for the arc need to be calculated relative to the center of the main circle
+            start_angle = angle + math.pi/2
+            end_angle = angle - math.pi/2
+            
+            pygame.draw.arc(surface, color, rect, start_angle, end_angle + math.pi, 2)
+            pygame.draw.arc(surface, color, rect, end_angle, start_angle + math.pi, 2)
+        
+        # Central circle for the rose
+        pygame.draw.circle(surface, color, center, int(radius * 0.15), 1)
+
+    def _draw_decorative_border(self, offset):
+        line_y = self.playable_height + offset[1]
+        border_height = 20 # The height of the decorative area
+        
+        # Create a surface for the border with per-pixel alpha
+        border_surf = pygame.Surface((self.width, border_height), pygame.SRCALPHA)
+        
+        # Base lines
+        pygame.draw.line(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 100), (0, 0), (self.width, 0), 2)
+        pygame.draw.line(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 50), (0, 2), (self.width, 2), 1)
+
+        # Gothic pattern loop
+        pattern_width = 80
+        num_patterns = self.width // pattern_width + 1
+        
+        for i in range(num_patterns):
+            p_x = i * pattern_width
+            
+            # Main arc
+            arc_rect = (p_x, -border_height, pattern_width, border_height * 2)
+            pygame.draw.arc(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 60), arc_rect, math.pi, 2 * math.pi, 2)
+            
+            # Fleur-de-lis inspired shape at the peak of the arc
+            peak_x = p_x + pattern_width // 2
+            pygame.draw.line(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 80), (peak_x, 0), (peak_x, 10), 1)
+            pygame.draw.circle(border_surf, (COLOR_GOLD.r, COLOR_GOLD.g, COLOR_GOLD.b, 80), (peak_x, 12), 3, 1)
+
+        self.screen.blit(border_surf, (offset[0], line_y))
+
+    def _draw_converging_particles(self, pos, max_radius, charge_ratio):
+        num_particles = 8
+        for i in range(num_particles):
+            angle = math.radians(i * (360 / num_particles) + time.time() * 100)
+            start_radius = max_radius * (1 - charge_ratio)
+            p_pos_x = pos[0] + start_radius * math.cos(angle)
+            p_pos_y = pos[1] + 10 + start_radius * math.sin(angle)
+            
+            # Particles get brighter as they converge
+            alpha = 150 + 105 * charge_ratio
+            color = (255, 255, 150, alpha)
+            
+            # Use a temp surface for alpha blending
+            particle_surf = pygame.Surface((4, 4), pygame.SRCALPHA)
+            pygame.draw.circle(particle_surf, color, (2, 2), 2)
+            self.screen.blit(particle_surf, (p_pos_x - 2, p_pos_y - 2), special_flags=pygame.BLEND_RGBA_ADD)
