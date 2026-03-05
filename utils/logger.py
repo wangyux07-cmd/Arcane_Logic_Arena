@@ -10,7 +10,7 @@ class Logger:
             cls._instance = super(Logger, cls).__new__(cls, *args, **kwargs)
         return cls._instance
 
-    def __init__(self, max_messages=5):
+    def __init__(self, max_messages=4):
         if not hasattr(self, 'initialized'):
             self.messages = collections.deque(maxlen=max_messages)
             self.initialized = True

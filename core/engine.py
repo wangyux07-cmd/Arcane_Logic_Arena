@@ -1,5 +1,7 @@
 import pygame
 import math
+import time
+import random
 from core.renderer import Renderer
 from utils.logger import logger
 
@@ -29,19 +31,28 @@ class MagicArena:
         self.projectiles = []
         self.game_over = False
         self.events = [] # Event queue for things like damage numbers
+        self.playable_height = int(height * 0.80)
         
         # Extended state for rendering and AI
         self.mage_states = {} # Holds AI state, casting info, etc.
+        self.last_logged_states = {} # For de-duplicating state logs
 
         if not self.headless:
             pygame.init()
             self.screen = pygame.display.set_mode((self.width, self.height))
             pygame.display.set_caption('Arcane Logic Arena')
-            self.renderer = Renderer(self.screen)
+            self.renderer = Renderer(self.screen, self.playable_height)
 
     def add_mage(self, mage):
-        """Adds a mage to the arena."""
+        """Adds a mage to the arena and sets its initial position within the playable area."""
         if len(self.mages) < 2:
+            # Enforce starting positions
+            y_start = self.playable_height / 2
+            if len(self.mages) == 0: # First mage (Merlin)
+                mage.x, mage.y = 200, y_start
+            else: # Second mage (Morgana)
+                mage.x, mage.y = self.width - 200, y_start
+
             self.mages.append(mage)
             self.mage_states[mage.name] = {'state': 'Idle', 'is_casting': False, 'target': None}
         else:
@@ -50,8 +61,8 @@ class MagicArena:
     def _handle_movement(self):
         for p in self.projectiles[:]:
             p.move()
-            # Remove projectiles that go off-screen
-            if not (0 < p.x < self.width and 0 < p.y < self.height):
+            # Remove projectiles that go off the playable area
+            if not (0 < p.x < self.width and 0 < p.y < self.playable_height):
                 self.projectiles.remove(p)
 
     def _check_collisions(self):
@@ -62,7 +73,9 @@ class MagicArena:
                     if distance < 15:
                         damage = 10
                         m.hp -= damage
-                        logger.log(f"{p.owner.name}'s fireball hits {m.name} for {damage} damage!", log_type='attack')
+                        # Richer logging: Log damage event
+                        log_msg = f"{m.name} takes {damage} damage from {p.owner.name}'s attack!"
+                        logger.log(log_msg, log_type='attack')
                         self.events.append({'type': 'damage', 'pos': (m.x, m.y - 20), 'amount': damage})
                         if p in self.projectiles:
                            self.projectiles.remove(p)
@@ -72,9 +85,10 @@ class MagicArena:
         for m in self.mages:
             if m.is_meditating:
                 m.mp = min(50, m.mp + 1)
+                # De-duplicated logging: Log when MP is full, but only once
                 if m.mp == 50 and not self.mage_states[m.name].get('fully_charged_logged'):
                     logger.log(f"{m.name} is fully charged.", log_type='recover')
-                    self.mage_states[m.name]['fully_charged_logged'] = True # Prevent log spam
+                    self.mage_states[m.name]['fully_charged_logged'] = True
             else:
                 self.mage_states[m.name]['fully_charged_logged'] = False
 
@@ -98,7 +112,15 @@ class MagicArena:
             if m.name in wizards:
                 wizard_instance = wizards[m.name]
                 if hasattr(wizard_instance, 'current_state_name'):
-                    mage_data['state'] = wizard_instance.current_state_name
+                    current_fsm_state = wizard_instance.current_state_name
+                    mage_data['state'] = current_fsm_state
+                    
+                    # De-duplicated logging: Log FSM state changes
+                    last_state = self.last_logged_states.get(m.name)
+                    if last_state != current_fsm_state:
+                        logger.log(f"{m.name} is now {current_fsm_state.lower()}.", log_type='system')
+                        self.last_logged_states[m.name] = current_fsm_state
+
                 # Get debug info for rendering
                 if hasattr(wizard_instance, 'get_debug_info'):
                     mage_data['debug'] = wizard_instance.get_debug_info(self.get_game_state())
@@ -135,13 +157,12 @@ class MagicArena:
                 if not self.headless:
                     self.renderer.add_blink_effect(mage.name, (mage.x, mage.y))
                 self.cast_blink(mage, params[0], params[1])
-                logger.log(f"{mage.name} blinks!", log_type='system')
+                logger.log(f"{mage.name} blinks.", log_type='system')
         elif command == 'MEDITATE':
             self.start_meditation(mage)
-            logger.log(f"{mage.name} starts meditating...", log_type='recover')
-            self.mage_states[mage.name]['state'] = "Meditating"
+            # Logging is now handled in get_game_state to avoid duplicates
         elif command == 'WAIT':
-            self.mage_states[mage.name]['state'] = "Waiting"
+            pass # Also handled in get_game_state
 
     def step(self, actions: dict, wizards: dict):
         self.events.clear() # Clear events at the start of the tick
@@ -157,6 +178,11 @@ class MagicArena:
         self._update_mages_status()
         self._check_win_conditions()
         
+        # Enforce stricter in-game boundaries
+        for mage in self.mages:
+            mage.x = max(50, min(self.width - 50, mage.x))
+            mage.y = max(100, min(self.playable_height - 50, mage.y))
+
         return self.get_game_state(wizards)
 
     def cast_fireball(self, caster, target_x, target_y):
@@ -168,8 +194,8 @@ class MagicArena:
 
     def cast_blink(self, caster, new_x, new_y):
         caster.mp -= 15
-        caster.x = max(0, min(self.width, new_x))
-        caster.y = max(0, min(self.height, new_y))
+        caster.x = new_x
+        caster.y = new_y
 
     def start_meditation(self, caster):
         caster.is_meditating = True

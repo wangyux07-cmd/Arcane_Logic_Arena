@@ -42,6 +42,14 @@ class HeuristicWizard(BaseWizard):
             for _ in range(2):
                 new_x = my_mage['x'] + random.uniform(-100, 100)
                 new_y = my_mage['y'] + random.uniform(-100, 100)
+
+                # Failsafe: If AI logic produces a weird coordinate, default to center.
+                # This helps prevent getting stuck at the absolute edge (0,0).
+                if math.isnan(new_x) or math.isnan(new_y) or (new_x < 1 and new_y < 1):
+                    screen_center_x = observation['width'] / 2
+                    screen_center_y = observation['height'] / 2
+                    new_x, new_y = screen_center_x, screen_center_y
+
                 actions.append(Action('BLINK', (new_x, new_y)))
                 
         # Meditate
@@ -55,34 +63,43 @@ class HeuristicWizard(BaseWizard):
         score = 0
         command = action.command
         enemy_mage = self._get_enemy_mage(self.name, observation)
-        dist_to_enemy = self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y']) if enemy_mage else float('inf')
+        if not enemy_mage: return 0 # Can't score without an enemy
+
+        dist_to_enemy = self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y'])
+        IDEAL_DISTANCE = 350.0
 
         # Baseline scores for actions
         if command == 'FIREBALL':
-            # Reward attacking, higher reward if enemy is close and we have MP
+            # Reward attacking, but penalize if too close or too far
             score += 50
-            score -= dist_to_enemy * 0.1 # Prefer closer targets
+            score -= abs(dist_to_enemy - IDEAL_DISTANCE) * 0.1 # Penalty for not being at ideal distance
             if my_mage['mp'] < 30:
-                score -= 40 # Penalize if it drains our MP too much
+                score -= 40 
         
         elif command == 'BLINK':
-            # High reward if HP is low
-            score += (100 - my_mage['hp']) * 1.5
-            # Try to blink away from the enemy
             new_x, new_y = action.params
-            if enemy_mage:
-                new_dist = self._distance(new_x, new_y, enemy_mage['x'], enemy_mage['y'])
-                score += (new_dist - dist_to_enemy) * 0.2
+            new_dist_to_enemy = self._distance(new_x, new_y, enemy_mage['x'], enemy_mage['y'])
+            
+            # High reward for blinking to ideal distance, especially if low on health
+            current_dist_error = abs(dist_to_enemy - IDEAL_DISTANCE)
+            new_dist_error = abs(new_dist_to_enemy - IDEAL_DISTANCE)
+            
+            # Reward for improving our position (getting closer to ideal distance)
+            score += (current_dist_error - new_dist_error) * 0.5
+            
+            # Bonus for evading when health is low
+            if my_mage['hp'] < 50:
+                score += (100 - my_mage['hp']) * 0.5
         
         elif command == 'MEDITATE':
-            # Reward based on how much MP is missing
-            score += (50 - my_mage['mp']) * 2
-            # High penalty if enemy is close
-            if dist_to_enemy < 200:
-                score -= 100
+            # Reward based on missing MP
+            score += (50 - my_mage['mp']) * 1.5
+            # Penalize heavily if not at a safe distance
+            if dist_to_enemy < IDEAL_DISTANCE - 50:
+                score -= 150
         
         elif command == 'WAIT':
-            score += 1 # Small default score
+            score += 1
 
         return score
 

@@ -36,18 +36,28 @@ class IdleState(State):
         if not my_mage or not enemy_mage:
             return Action('WAIT', None)
 
-        # 1. Priority: Evade if health is critical
-        if my_mage['hp'] < 20:
+        # 1. High-Priority Evade Triggers
+        # A. Evade if health has decreased since last frame
+        last_hp = wizard.last_known_hp.get(my_mage['name'], my_mage['hp'])
+        if my_mage['hp'] < last_hp:
             wizard.transition_to(wizard.evade_state)
             return wizard.evade_state.execute(wizard, observation)
 
-        # 2. Priority: Recover if MP is too low
+        # B. Evade if a projectile is too close
+        for proj in observation['projectiles']:
+            if proj['owner'] != my_mage['name']:
+                dist_to_proj = self._distance(my_mage['x'], my_mage['y'], proj['x'], proj['y'])
+                if dist_to_proj < 100:
+                    wizard.transition_to(wizard.evade_state)
+                    return wizard.evade_state.execute(wizard, observation)
+        
+        # 2. Priority: Recover if MP is too low, by first retreating
         if my_mage['mp'] < 10:
-            wizard.transition_to(wizard.recover_state)
-            return wizard.recover_state.execute(wizard, observation)
+            wizard.transition_to(wizard.retreat_state)
+            return wizard.retreat_state.execute(wizard, observation)
         
         # 3. Priority: Attack if MP is sufficient and enemy is in range
-        if my_mage['mp'] > 30 and self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y']) < 400: # 400 is attack range
+        if my_mage['mp'] > 30 and self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y']) < 400:
             wizard.transition_to(wizard.attack_state)
             return wizard.attack_state.execute(wizard, observation)
             
@@ -95,8 +105,49 @@ class RecoverState(State):
             wizard.transition_to(wizard.idle_state)
             return wizard.idle_state.execute(wizard, observation)
         
-        # TODO: Find a safe spot away from the enemy before meditating
         return Action('MEDITATE', None)
+
+class RetreatState(State):
+    """The wizard is retreating to a safe distance before recovering."""
+    def __init__(self):
+        self.target_pos = None
+
+    def execute(self, wizard: 'FSMWizard', observation: dict) -> Action:
+        my_mage = self._get_my_mage(wizard.name, observation)
+        enemy_mage = self._get_enemy_mage(wizard.name, observation)
+
+        # If we haven't decided where to retreat to, calculate it.
+        if self.target_pos is None:
+            direction_x = my_mage['x'] - enemy_mage['x']
+            direction_y = my_mage['y'] - enemy_mage['y']
+            distance = self._distance(my_mage['x'], my_mage['y'], enemy_mage['x'], enemy_mage['y'])
+            
+            # Normalize the direction vector
+            if distance > 0:
+                direction_x /= distance
+                direction_y /= distance
+
+            # Retreat to a point 300 units away from the current position, opposite the enemy
+            retreat_distance = 300
+            self.target_pos = (
+                my_mage['x'] + direction_x * retreat_distance,
+                my_mage['y'] + direction_y * retreat_distance
+            )
+
+            # Clamp to screen bounds
+            self.target_pos = (
+                max(50, min(observation['width'] - 50, self.target_pos[0])),
+                max(50, min(observation['height'] - 50, self.target_pos[1]))
+            )
+
+        # Check if we've arrived at the retreat point
+        if self._distance(my_mage['x'], my_mage['y'], self.target_pos[0], self.target_pos[1]) < 20:
+            self.target_pos = None # Reset for next time
+            wizard.transition_to(wizard.recover_state)
+            return wizard.recover_state.execute(wizard, observation)
+
+        # Move towards the target position
+        return Action('BLINK', self.target_pos)
 
 # ------------------ FSM Wizard Implementation ------------------
 
@@ -113,10 +164,12 @@ class FSMWizard(BaseWizard):
         self.attack_state = AttackState()
         self.evade_state = EvadeState()
         self.recover_state = RecoverState()
+        self.retreat_state = RetreatState()
         
         # Set the initial state
         self.current_state = self.idle_state
         self.current_state_name = "Idle"
+        self.last_known_hp = {}
 
     def transition_to(self, new_state: State):
         """Changes the current state of the wizard."""
@@ -128,6 +181,11 @@ class FSMWizard(BaseWizard):
         Delegates the action decision to the current state.
         The state's execute method will handle logic and transitions.
         """
+        # Update last known HP before acting
+        my_mage = self.current_state._get_my_mage(self.name, observation)
+        if my_mage:
+            self.last_known_hp[self.name] = my_mage['hp']
+
         return self.current_state.execute(self, observation)
 
     def get_debug_info(self, observation: dict) -> dict:
